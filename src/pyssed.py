@@ -284,8 +284,8 @@ def parse_args(cmdargs):
             if (len(procargs)>1):
                 setupfile=procargs[-1]
             procparams=[]
-        elif (proctype=="simple"):
-            print ("(2) Perform a simple (fast) fit")
+        elif (proctype=="simple" or proctype=="CSPN" or proctype=="OB"):
+            print ("(2) Perform a simple (fast) fit OR CSPN")
             try:
                 setupfile=float(procargs[-1])
             except:
@@ -6071,7 +6071,6 @@ def pyssed(cmdtype,cmdparams,proctype,procparams,setupfile,handler,total_sources
                     sed,modwave,modflux,teff,rad,lum,logg,feh,chisq,ebv=sed_fit_simple(sed,ancillary,modeldata,avdata,ebv)
                 elif (proctype == "OB"):
                     gtomo_ebv = ebv
-                    ebv = 0.64
                     sed, fratio_cs, lum_cs = sed_fit_OB_CSPN(sed, ebv, model_ebv_grid, ebv_list, dist, I_CSPN)
                     sed,modwave,modflux,teff,rad,lum,logg,feh,chisq,ebv=sed_fit_simple(sed,ancillary,modeldata,avdata,ebv)
                     np.put(sed[:]['model'], np.arange(len(sed)), modflux)
