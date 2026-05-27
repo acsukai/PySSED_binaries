@@ -1,0 +1,20 @@
+# 1. Fetch the latest from upstream
+git fetch upstream
+
+# 2. Switch to the clean base branch
+git checkout main
+
+# 3. Merge upstream changes into it
+git merge upstream/v1.1.20250129   # use whatever the branch is called
+
+# 4. Switch back to feature branch
+git checkout OB_fits
+
+# 5. Rebase feature work on top of the updated base
+git rebase main
+
+# Since the name of PySSED's development version periodically changes,
+#  step 3 may need the branch name to be updated.
+
+# To push changes:
+git push origin OB_fits

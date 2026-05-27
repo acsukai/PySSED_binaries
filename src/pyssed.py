@@ -89,6 +89,8 @@ try:
     from gtomo.sda.reddening import reddening as gtomo_reddening   # G-Tomo extinction correction
     from gtomo.sda.load_cube import load_cube   # G-Tomo extinction correction
 
+    import csv                                  # Used for OB fit output
+
 except Exception as e:
     print ("PySSED! Problem importing modules. Additional information:")
     print ("-----------------------------------------------------")
@@ -5860,6 +5862,18 @@ def pyssed(cmdtype,cmdparams,proctype,procparams,setupfile,handler,total_sources
 
         mindatapoints=int(pyssedsetupdata[pyssedsetupdata[:,0]=="MinDataPoints",1][0])
 
+        # Initialise model grid for OB fits and output data file
+        #  NB ensure directed TMAP model is the intended model
+        if (proctype == "OB"):
+            fOut_OB = '../output/OB_results.csv'
+            model_ebv_grid = pd.read_csv('TMAP_filter_convs_extinction_grid_40kK.csv', index_col=0)
+            I_CSPN = 144723008493.9894
+            ebv_list = np.asarray(model_ebv_grid.index.tolist())
+            
+            writer = csv.writer(open(fOut_OB, 'w', newline=''), delimiter=',')
+            header = ["cspn_gaia_id", "gtomo_ebv", "cs_lum", "comp_temp", "comp_logg", "comp_feh", "comp_chisq", "comp_lum", "flux_ratio_cs", "distance", "distance_error"]
+            writer.writerow(header)
+
         for counter, source in enumerate(sourcedata):
             if (handler != None):
                 handler.submit_status(task_id, "processing", { "stage": 2, "stages": 4, "status": f"Processing source {source}", "progress": (3 + 1) / total_steps, "step": (3 + counter + 1), "totalSteps": total_steps })
@@ -6015,6 +6029,12 @@ def pyssed(cmdtype,cmdparams,proctype,procparams,setupfile,handler,total_sources
             chisq=0; fitsuccess=0
             oe=0; ruwe=0; gof=0; avoeflux=0; uvxs=0; irxs=0
 
+            # --------------
+            # Remove points which are irrelevant to CSPN fits
+            for i in range(len(sed)):
+              if (((1./(sed[i]['wavel']/1e4))>10.) or ((1./(sed[i]['wavel']/1e4))<.4)):
+                sed[i]['mask']=False
+
             # Do we need to process the SEDs? No...?
             if (proctype == "none"):
                 if (verbosity > 0):
@@ -6049,6 +6069,13 @@ def pyssed(cmdtype,cmdparams,proctype,procparams,setupfile,handler,total_sources
                     if (verbosity > 20):
                         print ("Fitting SED with simple stellar model...")
                     sed,modwave,modflux,teff,rad,lum,logg,feh,chisq,ebv=sed_fit_simple(sed,ancillary,modeldata,avdata,ebv)
+                elif (proctype == "OB"):
+                    gtomo_ebv = ebv
+                    ebv = 0.64
+                    sed, fratio_cs, lum_cs = sed_fit_OB_CSPN(sed, ebv, model_ebv_grid, ebv_list, dist, I_CSPN)
+                    sed,modwave,modflux,teff,rad,lum,logg,feh,chisq,ebv=sed_fit_simple(sed,ancillary,modeldata,avdata,ebv)
+                    np.put(sed[:]['model'], np.arange(len(sed)), modflux)
+                    writer.writerow([source, str(gtomo_ebv), str(lum_cs), str(teff), str(logg), str(feh), str(chisq), str(lum), str(fratio_cs), str(dist), str(disterr)])
                 elif (proctype == "fit"):
                     if (verbosity > 20):
                         print ("Fitting SED with full stellar model...")
@@ -6429,6 +6456,115 @@ def pyssed(cmdtype,cmdparams,proctype,procparams,setupfile,handler,total_sources
         return results
 
     return errmsg
+
+
+def CSPN_bb_chisq(ebv, flux, log_ferr, grid_interp):
+
+    if ((ebv > -0.5) and (ebv < 3.)):
+        n=len(flux)
+        red_model = grid_interp(ebv)
+        flux=np.log10(flux)
+        offset=np.median(flux-red_model)
+        red_model+=offset
+        chisq=np.sum((red_model-flux)**2/((n-1)*log_ferr**2.))
+        return chisq
+    else:
+        return 9.99e10
+    
+
+def sed_fit_CSPN(sed,ebv,model_ebv_grid,ebv_list,dist,I_temp,reject_outliers):
+    # Fit E(B-V) to a set of CSPN models
+
+    # Only use for stars which are already believed to be CSPN - relies on hot temperatures
+    model_start_ebv = ebv
+      
+    flux=sed[sed['mask']>0]['flux']
+    ferr=sed[sed['mask']>0]['ferr']
+
+    filter_names = sed[sed['mask']>0]['svoname']
+    ebv_grid_selection = model_ebv_grid[filter_names].to_numpy()
+    ebv_grid_selection = np.log10(ebv_grid_selection)
+    grid_interp = interpolate.interp1d(ebv_list, ebv_grid_selection, axis=0)
+
+    log_ferr = ferr / flux
+    for i in range(len(log_ferr)):
+        if (log_ferr[i] < 0.05):
+            log_ferr[i] = 0.05
+    log_ferr /= np.log(10)
+
+    wavel=sed[sed['mask']>0]['wavel']/1.e10
+
+    ebv=optimize.minimize(CSPN_bb_chisq,model_start_ebv,args=(flux,log_ferr,grid_interp),method='Nelder-Mead')['x'][0]
+
+    n=len(flux)
+    cspn_fluxes = grid_interp(0.)
+    cspn_fluxes += 26. #Convert to Janskys
+    red_model = grid_interp(ebv)
+    red_model += 26.
+    flux=np.log10(flux)
+    offset=np.median(flux-red_model)
+    red_model+=offset
+    cspn_fluxes_offset=cspn_fluxes+offset
+    chisq_cont=(red_model-flux)**2/((n-1.)*log_ferr**2.)
+    chisq=np.sum(chisq_cont)
+
+    fratio = 10**offset
+    rsun = dist * np.sqrt(fratio) / 2.25461e-8
+    print('Star ang radius: ' + str(np.sqrt(fratio)))
+    print('Star radius: ' + str(rsun))
+    lum = I_temp * 4 * np.pi * (rsun * 6.96e8)**2.  / 3.828e26
+    print('Star luminosity: ' + str(lum))
+
+
+    np.put(sed[:]['derederr'],(sed['mask']>0).nonzero(),cspn_fluxes_offset)
+    np.put(sed[:]['model'],(sed['mask']>0).nonzero(),red_model)
+    np.put(sed[:]['ferr'],(sed['mask']>0).nonzero(),ferr)
+    return sed,wavel,red_model,fratio,chisq,ebv,lum,n
+
+
+def sed_fit_OB_CSPN(sed,ebv,model_ebv_grid,ebv_list,dist,I_temp):
+    uv_points = sed[(sed['wavel']<3000.) & (sed['mask']>0)]
+    
+    uv_filter_names = uv_points['svoname']
+    ebv_grid_selection = model_ebv_grid[uv_filter_names].to_numpy()
+    ebv_grid_selection = np.log10(ebv_grid_selection)
+    grid_interp = interpolate.interp1d(ebv_list, ebv_grid_selection, axis=0)
+
+    reddened_tmap_uv_fluxes = grid_interp(ebv)
+    reddened_tmap_uv_fluxes += 26. #Convert to Janskys
+    observed_uv_fluxes = uv_points['flux']
+    observed_uv_fluxes = np.log10(observed_uv_fluxes)
+    offset = np.median(observed_uv_fluxes - reddened_tmap_uv_fluxes)
+    reddened_tmap_uv_fluxes += offset
+    
+    filter_names = sed[sed['mask']>0]['svoname']
+    ebv_grid_selection = model_ebv_grid[filter_names].to_numpy()
+    ebv_grid_selection = np.log10(ebv_grid_selection)
+    grid_interp = interpolate.interp1d(ebv_list, ebv_grid_selection, axis=0)
+
+    reddened_tmap_fluxes = grid_interp(ebv)
+    reddened_tmap_fluxes += 26.
+    reddened_tmap_fluxes += offset
+    observed_fluxes = sed[sed['mask']>0]['flux']
+    subtracted_fluxes = observed_fluxes - 10**(reddened_tmap_fluxes)
+
+    new_dtype = sed.dtype.descr + [('unsub_flux', float)]
+    new_sed = np.zeros(sed.shape, dtype=new_dtype)
+    for name in sed.dtype.names:
+        new_sed[name] = sed[name]
+    new_sed['unsub_flux'] = sed['flux']
+    np.put(new_sed[:]['flux'], (new_sed['mask']>0).nonzero(), subtracted_fluxes)
+
+    for i in range(len(new_sed)):
+        if (new_sed[i]['wavel']<3000.):
+            new_sed[i]['mask']=False
+
+    fratio = 10**offset
+    rsun = dist * np.sqrt(fratio) / 2.25461e-8
+    lum = I_temp * 4 * np.pi * (rsun * 6.96e8)**2.  / 3.828e26
+
+    return new_sed, fratio, lum
+
 
 # -----------------------------------------------------------------------------
 # If running from the command line
